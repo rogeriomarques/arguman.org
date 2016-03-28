@@ -41,7 +41,9 @@ class DeletePreventionMixin(models.Model):
             instance=self
         )
 
+
 class PaginationMixin(object):
+
     def get_offset(self):
         return int_or_zero(self.request.GET.get("offset"))
 

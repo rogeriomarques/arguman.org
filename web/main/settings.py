@@ -40,16 +40,17 @@ INSTALLED_APPS = (
     'django.contrib.humanize',
     'django.contrib.sitemaps',
 
+    'typogrify',
     'social_auth',
     'django_gravatar',
     'rest_framework',
     'rest_framework.authtoken',
     'profiles',
     'premises',
+    'nouns',
     'newsfeed',
     'blog',
-    'api'
-
+    'api',
 )
 
 MIDDLEWARE_CLASSES = (
@@ -92,6 +93,8 @@ DATABASES = {
 # Internationalization
 # https://docs.djangoproject.com/en/1.6/topics/i18n/
 
+PREVENT_LANGUAGE_REDIRECTION = False
+
 REDIRECTED_PATHS = (
     '/',
     '/newsfeed',
@@ -103,11 +106,22 @@ REDIRECTED_PATHS = (
 )
 
 DEFAULT_LANGUAGE = 'en'
+
 BASE_DOMAIN = 'arguman.org'
+
 AVAILABLE_LANGUAGES = (
     'tr',
-    'en'
+    'en',
+    'ch'
 )
+
+LANGUAGE_CODE_MAPPING = {
+    'ch': 'zh-Hans'
+}
+
+LANGUAGE_CODE_MAPPING_REVERSED = {
+    v.lower(): k for k, v in LANGUAGE_CODE_MAPPING.iteritems()
+}
 
 TIME_ZONE = 'UTC'
 
@@ -150,8 +164,8 @@ CONTENT_DELETION = {
     'LAST_DELETION_DATE': timedelta(hours=1)
 }
 
-TWITTER_CONSUMER_KEY = None # defined in settings_local.py
-TWITTER_CONSUMER_SECRET = None # defined in settings_local.py
+TWITTER_CONSUMER_KEY = None  # defined in settings_local.py
+TWITTER_CONSUMER_SECRET = None  # defined in settings_local.py
 
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
@@ -177,6 +191,10 @@ SOCIAL_AUTH_PIPELINE = (
     'social_auth.backends.pipeline.social.load_extra_data',
     'social_auth.backends.pipeline.user.update_user_details',
 )
+
+DEFAULT_FROM_EMAIL = 'info@arguman.org'
+EMAIL_BACKEND = 'main.postmark_backend.EmailBackend'
+
 
 REST_FRAMEWORK = {
     # Use Django's standard `django.contrib.auth` permissions,
@@ -221,6 +239,22 @@ MARKITUP_FILTER = ('markdown.markdown', {'safe_mode': False})
 BLOG_FEED_TITLE = "Arguman.org Blog'u"
 BLOG_FEED_DESCRIPTION = "Arguman analizi platformu"
 BLOG_URL = "http://arguman.org/blog"
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'null': {
+            'class': 'django.utils.log.NullHandler',
+        },
+    },
+    'loggers': {
+        'django.security.DisallowedHost': {
+            'handlers': ['null'],
+            'propagate': False,
+     },
+    }
+}
 
 try:
     from settings_local import *

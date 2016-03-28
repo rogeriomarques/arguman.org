@@ -27,24 +27,28 @@ class SubdomainLanguageMiddleware(object):
 
         return HttpResponseRedirect(
             ''.join([
-                'http://',
-                language,
-                '.',
-                settings.BASE_DOMAIN,
-                request.path,
-                querystring
+                'http://', language, '.', settings.BASE_DOMAIN,
+                request.path, querystring
             ])
         )
+
+    def get_language_code(self, code):
+        mapping = settings.LANGUAGE_CODE_MAPPING
+        return mapping.get(code, code)
 
     def process_request(self, request):
         host = request.get_host().split('.')
         language = host[0]
 
-        if language not in self.LANGUAGES:
+        if settings.PREVENT_LANGUAGE_REDIRECTION:
+            language = settings.DEFAULT_LANGUAGE
+        elif language not in self.LANGUAGES:
             return self.redirect_homepage(request)
 
-        translation.activate(language)
-        request.LANGUAGE_CODE = language
+        language_code = self.get_language_code(language)
+
+        translation.activate(language_code)
+        request.LANGUAGE_CODE = language_code
 
 
 class MultipleProxyMiddleware(object):

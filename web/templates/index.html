@@ -5,43 +5,20 @@
 
 {% block content %}
     <div class="container home">
-
         {% include "home.html" %}
         {% include "tabs.html" %}
-
         {% block tab_content %}
-        <ul class="argument-list">
-            {% for contention in contentions %}
-                <li>
-                    <div class="stats">
-                        <span class="because">{{ contention.because.count }} {% trans "because" %}</span>
-                        <span class="but">{{ contention.but.count }} {% trans "but" %}</span>
-                        <span class="however">{{ contention.however.count }} {% trans "however" %}</span>
-                    </div>
-                    <div class="info">
-                        <a class="main-contention" href="{{ contention.get_absolute_url }}">{{ contention.title }}</a>
-                        <div class="user">{% trans "last sender:" %} <a
-                                href="{% url "auth_profile" contention.last_user.username %}">{{ contention.last_user }}</a>
-                            <time datetime="{{ contention.date_modification }}">({{ contention.date_modification|naturaltime }})</time>
-                        </div>
-                    </div>
-                </li>
-            {% empty %}
-                {% if keywords %}
-                    <li>{% trans "No results found." %}</li>
-                {% endif %}
-            {% endfor %}
-            {% if has_next_page %}
-            <li class="load-more">
-                <a class="next" href="{{ next_page_url }}">{% trans "Load more" %}</a>
-            </li>
-            {% endif %}
-        </ul>
+        {% if tab_class == "news" %}
+            {% include "premises/contention_list.html" with show_stats=True show_last_premise=True %}
+        {% else %}
+            {% include "premises/contention_list.html" with show_stats=True %}
+        {% endif %}
         {% endblock %}
-
     </div>
 {% endblock %}
 
 {% block extra-scripts %}
 {% include "infinity-pagination.html" %}
+<script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter\
+.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
 {% endblock %}

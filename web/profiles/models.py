@@ -12,10 +12,29 @@ from premises.signals import (reported_as_fallacy, added_premise_for_premise,
                               added_premise_for_contention,
                               supported_a_premise)
 from profiles.signals import follow_done
+from django.utils.translation import ugettext_lazy as _
+
+from django.core.mail import send_mail
 
 
 class Profile(AbstractUser):
     following = models.ManyToManyField("self", symmetrical=False)
+    notification_email = models.BooleanField(_('email notification'), default=True)
+    karma = models.IntegerField(null=True, blank=True)
+    twitter_username = models.CharField(max_length=255, blank=True, null=True)
+
+    def serialize(self, show_email=True):
+        bundle = {
+            'username': self.username,
+            'id': self.id
+        }
+
+        if show_email:
+            bundle.update({
+                'email': self.email
+            })
+
+        return bundle
 
     @property
     def followers(self):
@@ -31,6 +50,26 @@ class Profile(AbstractUser):
     @models.permalink
     def get_absolute_url(self):
         return "auth_profile", [self.username]
+
+    def calculate_karma(self):
+        # CALCULATES THE KARMA POINT OF USER
+        # ACCORDING TO HOW MANY TIMES SUPPORTED * 2
+        # DECREASE BY FALLACY COUNT * 2
+        # HOW MANY CHILD PREMISES ARE ADDED TO USER'S PREMISES
+        karma = 0
+        support_sum = self.user_premises.aggregate(Count('supporters'))
+        karma += 2 * support_sum['supporters__count']
+        main_premises = self.user_premises.all()
+        all_sub_premises = []
+        for premise in main_premises:
+            all_sub_premises += premise.published_children().values_list('pk',
+                                                                         flat=True)
+            karma -= 2 * (premise.reports.count())
+        not_owned_sub_premises = Premise.objects.\
+            filter(id__in=all_sub_premises).\
+            exclude(user__id=self.id).count()
+        karma += not_owned_sub_premises
+        return karma
 
 
 NOTIFICATION_ADDED_PREMISE_FOR_CONTENTION = 0
@@ -115,7 +154,7 @@ def create_premise_answer_notification(sender, premise, *args, **kwargs):
 
 
 @receiver(supported_a_premise)
-def create_premise_answer_notification(premise, user, *args, **kwargs):
+def create_premise_support_notification(premise, user, *args, **kwargs):
     Notification.objects.create(
         sender=user,
         recipient=premise.user,

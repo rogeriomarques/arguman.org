@@ -2,6 +2,8 @@
 
 import json
 from datetime import timedelta
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from markdown2 import markdown
 
 from django.contrib import messages
@@ -12,13 +14,14 @@ from django.utils.timezone import now
 from django.http import HttpResponse, Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.template.loader import render_to_string
-from django.views.generic import DetailView, TemplateView, CreateView, View
+from django.views.generic import DetailView, TemplateView, CreateView, View, RedirectView
 from django.views.generic.edit import UpdateView
 from django.utils.translation import get_language
 from django.db.models import Count
+from django.shortcuts import render
 
 from blog.models import Post
-from premises.models import Contention, Premise
+from premises.models import Contention, Premise, Report
 from premises.forms import (ArgumentCreationForm, PremiseCreationForm,
                             PremiseEditForm, ReportForm)
 from premises.signals import (added_premise_for_premise,
@@ -30,6 +33,9 @@ from premises.mixins import PaginationMixin, NextURLMixin
 from newsfeed.models import Entry
 from profiles.mixins import LoginRequiredMixin
 from profiles.models import Profile
+from nouns.models import Channel
+
+from i18n.utils import normalize_language_code
 
 
 def get_ip_address(request):
@@ -38,7 +44,10 @@ def get_ip_address(request):
 
 
 class ContentionDetailView(DetailView):
-    model = Contention
+    queryset = (Contention.objects
+                .select_related('user')
+                .prefetch_related('premises'))
+    context_object_name = 'contention'
 
     def get_template_names(self):
         view = self.request.GET.get("view")
@@ -60,12 +69,53 @@ class ContentionDetailView(DetailView):
             self.request.user.is_superuser or
             self.request.user.is_staff or
             contention.user == self.request.user)
+
+        parent = self.get_parent()
+        serialized = contention.serialize(self.request.user)
+        description = contention.title
+
+        if parent:
+            description = parent.text
+        elif serialized['premises']:
+            description = serialized['premises'][0]['text']
+
         return super(ContentionDetailView, self).get_context_data(
             premises=self.get_premises(),
-            parent_premise=self.get_parent(),
+            parent_premise=parent,
+            description=description,
             path=contention.get_absolute_url(),
             edit_mode=edit_mode,
+            serialized=serialized,
             **kwargs)
+
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        host = request.META['HTTP_HOST']
+
+        if not host.startswith(settings.AVAILABLE_LANGUAGES):
+            return redirect(self.object.get_full_url(), permanent=True)
+
+        if not normalize_language_code(get_language()) == self.object.language:
+            return redirect(self.object.get_full_url(), permanent=True)
+
+        partial = request.GET.get('partial')
+        level = request.GET.get('level')
+
+        if partial:
+            contention = self.object
+
+            try:
+                serialized = contention.partial_serialize(int(partial), self.request.user)
+            except (StopIteration, ValueError):
+                raise Http404
+
+            return render(request, 'premises/tree.html', {
+                'premises': serialized['premises'],
+                'serialized': serialized,
+                'level': int(level)
+            })
+
+        return super(ContentionDetailView, self).get(request, *args, **kwargs)
 
 
 class ContentionJsonView(DetailView):
@@ -136,6 +186,7 @@ class HomeView(TemplateView, PaginationMixin):
         else:
             notifications = None
         return super(HomeView, self).get_context_data(
+            channels=self.get_channels(),
             next_page_url=self.get_next_page_url(),
             tab_class=self.tab_class,
             notifications=notifications,
@@ -170,6 +221,11 @@ class HomeView(TemplateView, PaginationMixin):
 
         return contentions
 
+    def get_channels(self):
+        return Channel.objects.filter(
+            language=normalize_language_code(get_language())
+        ).order_by('order')
+
 
 class NotificationsView(LoginRequiredMixin, HomeView):
     template_name = "notifications.html"
@@ -183,19 +239,36 @@ class NotificationsView(LoginRequiredMixin, HomeView):
             **kwargs)
 
 
+class FallaciesView(HomeView, PaginationMixin):
+    tab_class = "fallacies"
+    template_name = "fallacies.html"
+    paginate_by = 10
+
+    def get_context_data(self, **kwargs):
+        language = normalize_language_code(get_language())
+        fallacies = (Report
+                     .objects
+                     .filter(reason__isnull=False,
+                             contention__language=language)
+                     .order_by('-id')
+                     [self.get_offset():self.get_limit()])
+        return super(FallaciesView, self).get_context_data(
+            fallacies=fallacies,
+            **kwargs)
+
+
 class SearchView(HomeView):
     tab_class = 'search'
     template_name = 'search/search.html'
     partial_templates = {
         'contentions': 'search/contention.html',
         'users': 'search/profile.html',
-        'premises' : 'search/premise.html'
+        'premises': 'search/premise.html'
     }
 
     method_mapping = {'contentions': "get_contentions",
                       'users': "get_users",
                       'premises': "get_premises"}
-
 
     def dispatch(self, request, *args, **kwargs):
         self.type = request.GET.get('type', 'contentions')
@@ -204,7 +277,11 @@ class SearchView(HomeView):
         return super(SearchView, self).dispatch(request, *args, **kwargs)
 
     def get_keywords(self):
-        return self.request.GET.get('keywords') or ""
+        return self.request.GET.get('keywords') or ''
+
+    def is_json(self):
+        return (self.request.is_ajax() or
+                self.request.GET.get('json'))
 
     def has_next_page(self):
         method = getattr(self, self.method_mapping[self.type])
@@ -214,13 +291,12 @@ class SearchView(HomeView):
     def get_search_bundle(self):
         method = getattr(self, self.method_mapping[self.type])
         return [{'template': self.partial_templates[self.type],
-                'object': item} for item in method()]
+                 'object': item} for item in method()]
 
     def get_context_data(self, **kwargs):
         return super(SearchView, self).get_context_data(
             results=self.get_search_bundle(),
             **kwargs)
-
 
     def get_next_page_url(self):
         offset = self.get_offset() + self.paginate_by
@@ -236,12 +312,11 @@ class SearchView(HomeView):
             result = Premise.objects.none()
         else:
             result = (Premise.objects.filter(
-                argument__language=get_language(),
+                argument__language=normalize_language_code(get_language()),
                 text__contains=keywords))
             if paginate:
                 result = result[self.get_offset():self.get_limit()]
         return result
-
 
     def get_users(self, paginate=True):
         keywords = self.request.GET.get('keywords')
@@ -254,7 +329,6 @@ class SearchView(HomeView):
                 result = result[self.get_offset():self.get_limit()]
         return result
 
-
     def get_contentions(self, paginate=True):
         keywords = self.request.GET.get('keywords')
         if not keywords or len(keywords) < 2:
@@ -263,12 +337,30 @@ class SearchView(HomeView):
             result = (Contention
                       .objects
                       .filter(title__icontains=keywords,
-                              language=get_language()))
+                              language=normalize_language_code(get_language())))
 
             if paginate:
                 result = result[self.get_offset():self.get_limit()]
 
         return result
+
+    def render_to_response(self, context, **response_kwargs):
+        """
+        Returns a JSON response, transforming 'context' to make the payload.
+        """
+        if not self.is_json():
+            return super(SearchView, self).render_to_response(
+                context, **response_kwargs)
+
+        results = [{
+                       "id": result['object'].id,
+                       "label": unicode(result['object'])
+                   } for result in context['results']]
+
+        return HttpResponse(
+            json.dumps(results),
+            dict(content_type='application/json', **response_kwargs)
+        )
 
 
 class NewsView(HomeView):
@@ -280,12 +372,35 @@ class NewsView(HomeView):
                 .objects
                 .language()
                 .filter(is_published=True)
+                .order_by('-date_modification')
         )
 
         if paginate:
             contentions = contentions[self.get_offset():self.get_limit()]
 
         return contentions
+
+
+class FeaturedJSONView(HomeView):
+    def render_to_response(self, context, **response_kwargs):
+        contentions = [contention.get_overview_bundle()
+                       for contention in self.get_contentions()]
+        return HttpResponse(
+            json.dumps({"contentions": contentions},
+                       cls=DjangoJSONEncoder),
+            content_type="application/json"
+        )
+
+
+class NewsJSONView(NewsView):
+    def render_to_response(self, context, **response_kwargs):
+        contentions = [contention.get_overview_bundle()
+                       for contention in self.get_contentions()]
+        return HttpResponse(
+            json.dumps({"contentions": contentions},
+                       cls=DjangoJSONEncoder),
+            content_type="application/json"
+        )
 
 
 class StatsView(HomeView):
@@ -299,7 +414,7 @@ class StatsView(HomeView):
 
     method_mapping = {
         "active_users": "get_active_users",
-        "supported_users": "get_supported_users",
+        "user_karma": "get_user_karma",
         "disgraced_users": "get_disgraced_users",
         "supported_premises": "get_supported_premises",
         "fallacy_premises": "get_fallacy_premises",
@@ -351,30 +466,28 @@ class StatsView(HomeView):
                 "template": self.partial_templates[type(item)],
                 "object": item
             } for item in method()
-        ]
+            ]
 
     def get_active_users(self):
         return Profile.objects.annotate(
-            premise_count=Sum("premise"),
+            premise_count=Sum("user_premises"),
         ).filter(
             premise_count__gt=0,
-            **self.build_time_filters(date_field="premise__date_creation")
+            **self.build_time_filters(date_field="user_premises__date_creation")
         ).order_by("-premise_count")[:10]
 
-    def get_supported_users(self):
-        return Profile.objects.annotate(
-            supporter_count=Sum("premise__supporters"),
-        ).filter(
-            supporter_count__gt=0,
-            **self.build_time_filters(date_field="premise__date_creation")
-        ).order_by("-supporter_count")[:10]
+    def get_user_karma(self):
+        return Profile.objects.filter(
+            karma__gt=0,
+            **self.build_time_filters(date_field="user_premises__date_creation")
+        ).order_by("-karma", "id").distinct()[:10]
 
     def get_disgraced_users(self):
         return Profile.objects.annotate(
-            report_count=Sum("premise__reports"),
+            report_count=Sum("user_premises__reports"),
         ).filter(
             report_count__gt=0,
-            **self.build_time_filters(date_field="premise__date_creation")
+            **self.build_time_filters(date_field="user_premises__date_creation")
         ).order_by("-report_count")[:10]
 
     def get_supported_premises(self):
@@ -398,7 +511,7 @@ class StatsView(HomeView):
         return Contention.objects.annotate(
             premise_count=Sum("premises"),
         ).filter(
-            language=get_language(),
+            language=normalize_language_code(get_language()),
             premise_count__gt=0,
             **self.build_time_filters(date_field="date_creation")
         ).order_by("-premise_count")[:10]
@@ -461,13 +574,28 @@ class ArgumentCreationView(LoginRequiredMixin, CreateView):
     template_name = "premises/new_contention.html"
     form_class = ArgumentCreationForm
 
+    help_texts = {
+        'title': 'premises/examples/contention.html',
+        'owner': 'premises/examples/owner.html',
+        'sources': 'premises/examples/sources.html'
+    }
+
+    def get_form_class(self):
+        form_class = self.form_class
+        for key, value in self.help_texts.items():
+            help_text = render_to_string(value)
+            form_class.base_fields[key].help_text = help_text
+        return form_class
+
     def form_valid(self, form):
         form.instance.user = self.request.user
         form.instance.ip_address = get_ip_address(self.request)
-        form.instance.language = get_language()
+        form.instance.language = normalize_language_code(get_language())
         form.instance.is_published = True
         response = super(ArgumentCreationView, self).form_valid(form)
         form.instance.update_sibling_counts()
+        form.instance.save_nouns()
+        form.instance.save()
         return response
 
 
@@ -482,10 +610,28 @@ class ArgumentUpdateView(LoginRequiredMixin, UpdateView):
         return contentions.filter(user=self.request.user)
 
     def form_valid(self, form):
-        form.instance.user = self.request.user
         response = super(ArgumentUpdateView, self).form_valid(form)
         form.instance.update_sibling_counts()
+        form.instance.nouns.clear()
+        form.instance.save_nouns()
+        form.instance.update_premise_weights()
+        form.instance.save()
         return response
+
+
+class RandomArgumentView(RedirectView):
+    permanent = False
+
+    def get_redirect_url(self, *args, **kwargs):
+        argument = Contention.objects.annotate(
+            premise_count=Count('premises')
+        ).filter(
+            premise_count__gt=2,
+            language=normalize_language_code(get_language())
+        ).order_by(
+            '?'
+        )[0]
+        return argument.get_absolute_url()
 
 
 class ArgumentPublishView(LoginRequiredMixin, DetailView):
@@ -535,6 +681,19 @@ class PremiseEditView(LoginRequiredMixin, UpdateView):
     template_name = "premises/edit_premise.html"
     form_class = PremiseEditForm
 
+    help_texts = {
+        'premise_type': 'premises/examples/premise_type.html',
+        'text': 'premises/examples/premise.html',
+        'sources': 'premises/examples/premise_source.html'
+    }
+
+    def get_form_class(self):
+        form_class = self.form_class
+        for key, value in self.help_texts.items():
+            help_text = render_to_string(value)
+            form_class.base_fields[key].help_text = help_text
+        return form_class
+
     def get_queryset(self):
         premises = Premise.objects.all()
         if self.request.user.is_superuser:
@@ -553,6 +712,19 @@ class PremiseEditView(LoginRequiredMixin, UpdateView):
 class PremiseCreationView(NextURLMixin, LoginRequiredMixin, CreateView):
     template_name = "premises/new_premise.html"
     form_class = PremiseCreationForm
+
+    help_texts = {
+        'premise_type': 'premises/examples/premise_type.html',
+        'text': 'premises/examples/premise.html',
+        'sources': 'premises/examples/premise_source.html'
+    }
+
+    def get_form_class(self):
+        form_class = self.form_class
+        for key, value in self.help_texts.items():
+            help_text = render_to_string(value)
+            form_class.base_fields[key].help_text = help_text
+        return form_class
 
     def get_context_data(self, **kwargs):
         return super(PremiseCreationView, self).get_context_data(
@@ -579,10 +751,11 @@ class PremiseCreationView(NextURLMixin, LoginRequiredMixin, CreateView):
                                               premise=form.instance)
 
         contention.date_modification = timezone.now()
+        contention.update_premise_weights()
         contention.save()
 
         return redirect(
-            form.instance.get_parent().get_absolute_url() +
+            form.instance.get_absolute_url() +
             self.get_next_parameter()
         )
 
@@ -605,9 +778,15 @@ class PremiseSupportView(NextURLMixin, LoginRequiredMixin, View):
         premise.supporters.add(self.request.user)
         supported_a_premise.send(sender=self, premise=premise,
                                  user=self.request.user)
+        premise.argument.update_premise_weights()
+
+        if request.is_ajax():
+            return HttpResponse(status=201)
+
         return redirect(
             premise.get_parent().get_absolute_url() +
-            self.get_next_parameter()
+            self.get_next_parameter() +
+            "#%s" % premise.pk
         )
 
     def get_contention(self):
@@ -618,9 +797,15 @@ class PremiseUnsupportView(PremiseSupportView):
     def delete(self, request, *args, **kwargs):
         premise = self.get_premise()
         premise.supporters.remove(self.request.user)
+        premise.argument.update_premise_weights()
+
+        if request.is_ajax():
+            return HttpResponse(status=204)
+
         return redirect(
             premise.get_parent().get_absolute_url() +
-            self.get_next_parameter()
+            self.get_next_parameter() +
+            "#%s" % premise.pk
         )
 
     post = delete
@@ -643,6 +828,7 @@ class PremiseDeleteView(LoginRequiredMixin, View):
         if not contention.premises.exists():
             contention.is_published = False
             contention.save()
+        contention.update_premise_weights()
         return redirect(contention)
 
     post = delete
@@ -654,6 +840,12 @@ class PremiseDeleteView(LoginRequiredMixin, View):
 class ReportView(NextURLMixin, LoginRequiredMixin, CreateView):
     form_class = ReportForm
     template_name = "premises/report.html"
+
+    def get_form_class(self):
+        form = self.form_class
+        help_text = render_to_string('premises/examples/fallacy.html')
+        form.base_fields['fallacy_type'].help_text = help_text
+        return form
 
     def get_context_data(self, **kwargs):
         return super(ReportView, self).get_context_data(
@@ -682,7 +874,26 @@ class ReportView(NextURLMixin, LoginRequiredMixin, CreateView):
         form.instance.reporter = self.request.user
         form.save()
         reported_as_fallacy.send(sender=self, report=form.instance)
+        contention.update_premise_weights()
         return redirect(
             premise.get_parent().get_absolute_url() +
-            self.get_next_parameter()
+            self.get_next_parameter() +
+            "#%s" % premise.pk
+        )
+
+
+class RemoveReportView(NextURLMixin, LoginRequiredMixin, View):
+    def get_premise(self):
+        return get_object_or_404(Premise, pk=self.kwargs['pk'])
+
+    def post(self, request, *args, **kwargs):
+        premise = self.get_premise()
+        premise.reports.filter(
+            reporter=request.user,
+            fallacy_type=request.GET.get('type')
+        ).delete()
+        return redirect(
+            premise.get_parent().get_absolute_url() +
+            self.get_next_parameter() +
+            "#%s" % premise.pk
         )

@@ -3,8 +3,11 @@ from django.db.models.signals import post_delete, post_save
 
 from django.dispatch import receiver
 from django.template.loader import render_to_string
+from django.utils.translation import get_language
 
+from i18n.utils import normalize_language_code
 from newsfeed.utils import get_collection
+from main.utils import send_complex_mail
 from premises.models import Contention, Premise, Report
 from premises.signals import (
     reported_as_fallacy, added_premise_for_premise,
@@ -111,15 +114,22 @@ class EntryManager(object):
                     .limit(limit))
         return map(Entry, newsfeed)
 
+    def get_language(self):
+        return normalize_language_code(get_language())
+
     def get_public_newsfeed(self, offset, limit):
         """
         Fetches news items from the newsfeed database
         """
+        language = self.get_language()
+
         parameters = {
             "news_type": {
                 "$in": [NEWS_TYPE_CONTENTION,
-                        NEWS_TYPE_PREMISE]
-            }
+                        NEWS_TYPE_PREMISE,
+                        NEWS_TYPE_FALLACY]
+            },
+            "related_object.language": language
         }
 
         newsfeed = (Entry
@@ -136,7 +146,7 @@ class EntryManager(object):
         Fetches news items of specific user
         """
         parameters = {
-            "sender.email": user.email,
+            "sender.username": user.username,
             "news_type": {
                 "$in": [NEWS_TYPE_CONTENTION,
                         NEWS_TYPE_PREMISE,
@@ -208,6 +218,15 @@ def create_premise_entry(premise, **kwargs):
         - Report
     That models have `get_news_type` method.
     """
+    user_emails = [user.email for user in premise.parent_users
+                   if user.email and user.notification_email]
+    send_complex_mail('New premise for %s'% premise.argument.title,
+                      'email/premise_notification.txt',
+                      'email/premise_notification.html',
+                      'info@arguman.org',
+                      bcc=user_emails,
+                      context={'premise': premise})
+
     Entry.objects.create(
         object_id=premise.id,
         news_type=premise.get_newsfeed_type(),
